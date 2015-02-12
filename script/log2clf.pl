@@ -1,4 +1,4 @@
-#!/home/janw/bin/swipl
+#!/usr/bin/env swipl
 
 % You can make this program executable by  removing the % from the first
 % line and update the path the SWI-Prolog interpreter
@@ -6,7 +6,7 @@
 % Convert Prolog logs to apache's Combined Log Format
 % http://httpd.apache.org/docs/1.3/logs.html#combined
 
-:- use_module(logstat).
+:- use_module(library(http/logstat)).
 :- use_module(library(http/http_header)).
 :- use_module(library(main)).
 
