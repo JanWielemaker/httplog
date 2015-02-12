@@ -1,3 +1,32 @@
+/*  Part of SWI-Prolog
+
+    Author:        Jan Wielemaker
+    E-mail:        J.Wielemaker@cs.vu.nl
+    WWW:           http://www.swi-prolog.org
+    Copyright (C): 2015, VU University Amsterdam
+
+    This program is free software; you can redistribute it and/or
+    modify it under the terms of the GNU General Public License
+    as published by the Free Software Foundation; either version 2
+    of the License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public
+    License along with this library; if not, write to the Free Software
+    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+    As a special exception, if you link this library with other files,
+    compiled with a Free Software compiler, to produce an executable, this
+    library does not by itself cause the resulting executable to be covered
+    by the GNU General Public License. This exception does not however
+    invalidate any other reasons why the executable file might be covered by
+    the GNU General Public License.
+*/
+
 :- module(logstat,
 	  [ clean_log/0,
 	    read_log/1,			% +File
@@ -15,35 +44,54 @@
 
 /** <module> Process SWI-Prolog HTTPD logfiles
 
-Interesting fields:
+This module reads SWI-Prolog HTTPD logfiles   and  allows asking queries
+about them.  Below is a simple example that extracts SPARQL queries from
+a [ClioPatria](http://cliopatria.swi-prolog.org) log file:
 
-	* TimeStamp
-	* Session
-	* Remote IP
-	* Path
-	* Query parms
-	* Referrer
-	* Result+Time
+  ==
+  ?- use_module(library(http/logstat)).
+  ?- read_log('httpd.log').
+  ?- logrecord([path('/sparql/'), search([query=Query])]).
+  Query = 'PREFIX rdf: ...'
+  ==
 
-Database:
-
-	logrecord(N, Time, Session, RemoteIP, Path,
-		  Query, Referrer, Code, Result, Extra).
-
-Extra fields:
-
-	* cpu(Seconds)
-	* user_agent(Agent)
-	* http_version(Major-Minor)
-	* bytes(Count)
-	* city(City)			% Nginx geoip service
-	* lat(Latitude)
-	* lon(Longitude)
-
----++ Query API
-
-The main query API is formed by logrecord/1.
+@see library(http/http_log) provides the HTTP framework component to
+write logfiles that are expected by this library.
 */
+
+%%	logrecord(?N, ?Time, ?Session, ?RemoteIP, ?Path,
+%%		  ?Query, ?Referrer, ?Code, ?Result, ?Extra)
+%
+%	Database predicate that represents an HTTP transaction.
+%
+%	@arg N is the index number of the record
+%	@arg Time is the POSIX time stamp the query was fired
+%	@arg Session is the session-id or `-` if the request has no
+%	session
+%	@arg RemoteIP is the remote IP address
+%	@arg Path is the HTTP location, starting with `/`
+%	@arg Query is a list of `Name=Value` terms holding the (GET)
+%	query parameters
+%	@arg Referrer is the referer URL or `-` if unknown
+%	@arg Code is the HTTP numerical reply code
+%	@arg Result is Prolog notion of the result as a Prolog term
+%	@arg Extra is a list with Key(Value) terms holding the
+%	keys below.  Only cpu(Seconds) is always present.
+%
+%	  - cpu(Seconds)
+%	  CPU time used to process the query
+%	  - bytes(Count)
+%	  Number of bytes sent (if known)
+%	  - user_agent(UserAgent)
+%	  Browser identifier (if known)
+%	  - http_version(Major-Minor)
+%	  HTTP Protocol version
+%	  - city(City)
+%	  Name of the city (if configured)
+%	  - lat(Lat)
+%	  Latitude (if configured)
+%	  - lon(Lon)
+%	  Longitude (if configured)
 
 :- dynamic
 	logrecord/10.
@@ -77,7 +125,17 @@ clean_log :-
 	log_state(progress:boolean=true,
 		  skip_bad_requests:boolean=false).
 
-%%	read_log(+File)
+%%	read_log(+File) is det.
+%%	read_log(+File, +Options) is det.
+%
+%	Read a SWI-Prolog HTTP logfile.  If   the  file contains errors,
+%	these are printed to the terminal  and the corresponding records
+%	are ignored.  Options supported:
+%
+%	  - progress(+Boolean)
+%	  Indicate progress on the terminal (default `true`)
+%	  - skip_bad_requests(+Boolean)
+%	  Ignore 400 requests.
 
 read_log(File) :-
 	read_log(File, []).
@@ -86,7 +144,7 @@ read_log(File, Options) :-
 	make_log_state(Options, State, _),
 	rb_empty(Open),
 	setup_call_cleanup(myopen(File, In),
-			   (   read(In, Term0),
+			   (   read_skip_errors(In, Term0),
 			       read_log(Term0, In, 1, Open, State)
 			   ),
 			   close(In)),
@@ -112,16 +170,19 @@ read_log(Term, In, Count0, Open0, State) :-
 	    assert_log(Term, Count0, Count1, Open0, Open1)
 	),
 	progress(Count1, State),
-	repeat,
-	catch(read(In, Term2), E, (print_message(error, E),fail)), !,
+	read_skip_errors(In, Term2),
 	read_log(Term2, In, Count1, Open1, State).
 read_log(Term, In, Count, Open, State) :-
 	(   skip_term(Term, State)
 	->  true
 	;   format(user_error, '~NWarning: failed to process ~p~n', [Term])
 	),
-	read(In, Term2),
+	read_skip_errors(In, Term2),
 	read_log(Term2, In, Count, Open, State).
+
+read_skip_errors(In, Term) :-
+	repeat,
+	catch(read(In, Term), E, (print_message(error, E),fail)), !.
 
 skip_term(completed(_, _, _, 400, _), _).
 skip_term(completed(0, _, _, 500, error(_)), _).
@@ -225,19 +286,46 @@ extra_field(Request, _, lon(Lon)) :-
 %%	logrecord(+Query) is nondet.
 %
 %	Query by list of fieldnames. Query   list  a list of Name(Value)
-%	specifications. Name can be a name as defined by field/2, a Name
-%	that appears in the  `Extra'  field,   or  one  of the following
-%	defined special fields:
+%	specifications.  Name is one of:
 %
+%	    * key(Integer)
+%	    Integer number of the request (1,2,3,...)
+%	    * time(Float)
+%	    POSIX time stamp of the request.
+%	    * session(Atom)
+%	    The session-id or `-` if the request has no session
+%	    * ip(Atom)
+%	    The remote IP address
+%	    * path(Atom)
+%	    The HTTP location, starting with `/`
+%	    * query(list(Name=Value))
+%	    List of `Name=Value` terms holding the (GET) query parameters
+%	    * referer(Atom)
+%	    The referer URL or `-` if unknown
+%	    * code(Integer)
+%	    Code is the HTTP numerical reply code
+%	    * result(Term)
+%	    Prolog notion of the result as a Prolog term
+%	    * cpu(Seconds)
+%	    CPU time used to process the query
+%	    * bytes(Count)
+%	    Number of bytes sent (if known)
+%	    * user_agent(UserAgent)
+%	    Browser identifier (if known)
+%	    * http_version(Major-Minor)
+%	    HTTP Protocol version
+%	    * city(City)
+%	    Name of the city (if configured)
+%	    * lat(Lat)
+%	    Latitude (if configured)
+%	    * lon(Lon)
+%	    Longitude (if configured)
 %	    * after(+TimeSpec)
 %	    Only consider records created after TimeSpec.  TimeSpec is
 %	    one of:
-%
 %	        * Year/Month/Day
-%
 %	    * before(+TimeSpec)
 %	    See after(TimeSpec).
-%
 %	    * search([Name=Value...])
 %	    Demand the following fields to be present in the query.
 
