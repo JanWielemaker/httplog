@@ -161,7 +161,8 @@ myopen(File, In) :-			% generate error
 	open(File, read, In, [encoding(utf8)]).
 
 
-read_log(end_of_file, _, _, _, _) :- !.
+read_log(end_of_file, _, _, Open, _State) :- !,
+	close_all(Open).
 read_log(Term, In, Count0, Open0, State) :-
 	(   assert_log(Term, Count0, Count1, Open0, Open1)
 	->  !
@@ -191,27 +192,27 @@ skip_term(completed(_, _, _, _, _), State) :-
 
 assert_log(server(_StartStop, _Time), Count, Count, Open0, Open) :- !,
 	close_all(Open0),
-	rb_empty(Open).
+	rb_new(Open).
 assert_log(request(I, Time, Request), Count0, Count, Open0, Open) :- !,
 	Count is Count0+1,
 	rb_insert_new(Open0, I, r(Count0, Time, Request), Open).
 assert_log(completed(I, CPU, Status), Count, Count, Open0, Open) :-
 	rb_delete(Open0, I, r(Id, Time, Request), Open),
-	save_record(Id, Time, CPU, Request, 0, 0, Status).
+	save_record(Id, I, Time, CPU, Request, 0, 0, Status).
 assert_log(completed(I, CPU, Bytes, Code, Status), Count, Count, Open0, Open) :-
 	rb_delete(Open0, I, r(Id, Time, Request), Open),
-	save_record(Id, Time, CPU, Request, Bytes, Code, Status).
+	save_record(Id, I, Time, CPU, Request, Bytes, Code, Status).
 
 close_all(Open0) :-
 	rb_visit(Open0, Pairs),
 	close_pairs(Pairs).
 
 close_pairs([]).
-close_pairs([_RID-r(Id, Time, Request)|T]) :-
-	save_record(Id, Time, 0, Request, 0, 500, no_reply),
+close_pairs([RID-r(Id, Time, Request)|T]) :-
+	save_record(Id, RID, Time, 0, Request, 0, 500, no_reply),
 	close_pairs(T).
 
-save_record(Id, Time, CPU, Request, Bytes, Code, Status) :-
+save_record(Id, SeqNo, Time, CPU, Request, Bytes, Code, Status) :-
 	session(Request, Session),
 	remote_IP(Request, RemoteIP),
 	path(Request, Path),
@@ -220,7 +221,8 @@ save_record(Id, Time, CPU, Request, Bytes, Code, Status) :-
 	extra(Request, Bytes, Extra),
 	assert(logrecord(Id, Time, Session, RemoteIP,
 			 Path, Parms, Referer, Code, Status,
-			 [ cpu(CPU)
+			 [ cpu(CPU),
+			   seqno(SeqNo)
 			 | Extra
 			 ])).
 
@@ -290,6 +292,9 @@ extra_field(Request, _, lon(Lon)) :-
 %
 %	    * key(Integer)
 %	    Integer number of the request (1,2,3,...)
+%	    * seqno(Integer)
+%	    Original sequence number from the log file (may have
+%	    duplicates)
 %	    * time(Float)
 %	    POSIX time stamp of the request.
 %	    * session(Atom)
